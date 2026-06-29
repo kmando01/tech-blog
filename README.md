@@ -16,6 +16,16 @@
 | 3 | [JEP 491이 고친 것과 고치지 못한 것](./posts/2026-06-29-virtual-threads-pinning.md) | synchronized 해결, JNI pinning은 JDK 25에서도 잔존 |
 | 4 | [가상 스레드 10만 개를 띄우기 전에 계산해야 할 두 가지](./posts/2026-06-29-virtual-threads-memory.md) | Continuation 힙 비용, ThreadLocal × vthread = OOM |
 
+### 분산 시스템 실증 실험
+
+Redis와 MongoDB에서 "성능을 높이려다 오히려 낮아진" 사례들을 수치로 검증했습니다.
+
+| # | 제목 | 핵심 발견 |
+|---|------|-----------|
+| 1 | [Redis 분산락을 달았더니 처리량이 16배 떨어졌다](./posts/2026-06-29-redis-distributed-lock.md) | 수학적 TPS 상한, writeConflict 제거의 역설 |
+| 2 | [MongoDB replaceOne vs $set: 예측이 두 번 빗나갔다](./posts/2026-06-29-mongodb-replace-vs-set.md) | dirty bytes 1.9x(예측 33x), oplog 175x(예측 33x) |
+| 3 | [핫 도큐먼트는 자기만 느린 게 아니다](./posts/2026-06-29-mongodb-hot-document.md) | cold worker -55% 피해, write ticket pool 인질 |
+
 ---
 
 실험 코드: [kmando01/jvm-virtual-threads-bench](https://github.com/kmando01/jvm-virtual-threads-bench)
