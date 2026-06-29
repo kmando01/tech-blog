@@ -1,6 +1,6 @@
 # MongoDB replaceOne vs $set: 예측이 두 번 빗나갔다
 
-> **실험일**: 2026-06-29 | **스택**: MongoDB 7.0 / Python pymongo | **시리즈**: 분산 시스템 실증 실험
+> **실험일**: 2026-06-29 | **스택**: MongoDB 7.0.37 / Python pymongo 4.14 | **시리즈**: 분산 시스템 실증 실험
 
 ---
 
@@ -29,6 +29,7 @@ dirty bytes가 일정 비율(기본 20%)을 넘으면 background eviction worker
 의도적으로 가혹한 조건을 만들었습니다.
 
 ```
+MongoDB:              7.0.37 (단일 노드 replica set rs0)
 WiredTiger cache:     262 MB  (--wiredTigerCacheSizeGB 0.256)
 Eviction worker 수:   최소 (threads_min=1, threads_max=2)
 컬렉션 크기:          1,000 docs × ~100 KB ≈ 97.8 MB
@@ -48,6 +49,8 @@ coll.update_one({"_id": uid}, {"$set": {
     "counter": val,
 }})
 ```
+
+> **버전 주의**: 이 실험은 MongoDB 7.0 기준입니다. 8.0에서는 동작이 달라지는 항목이 두 가지 있습니다. 실험 결과 이후에 정리했습니다.
 
 ---
 
@@ -109,7 +112,7 @@ page cost = 동일
 추가 비용:
   Full Replace: 100KB update chain
   $set:         ~3KB delta
-  
+
 총 비용 비율 = (100KB + 100KB) / (100KB + 3KB) ≈ 1.9×
 ```
 
@@ -133,7 +136,16 @@ $set oplog entry:             575 bytes  (0.6 KB)
 
 예측이 5배 이상 빗나간 이유가 있습니다. Full Replace는 oplog에 **문서 전체를 JSON으로 직렬화**해서 씁니다. 100KB 문서가 그대로 oplog entry에 들어갑니다. `$set`은 변경된 필드 3개의 diff만 씁니다.
 
-원래 예측(33배)은 "100KB vs 3KB"를 단순 비율로 계산한 것이었는데, oplog entry에는 메타데이터·연산자·필드명이 추가됩니다. `$set`의 실제 oplog 크기(575 bytes)는 순수 데이터(3개 필드) 외에 oplog 구조 overhead가 포함됩니다. 반면 Full Replace의 oplog(100,992 bytes)는 100KB 문서 + overhead로 더 커집니다.
+### oplog는 설정 크기를 초과해서 성장합니다 (MongoDB 4.0+)
+
+혹시 "oplog 크기를 제한하면 디스크 걱정 없다"고 생각하고 계신가요? MongoDB 4.0부터 oplog는 configured size를 넘어서 성장할 수 있습니다.
+
+공식 문서의 설명입니다.
+
+> *"Unlike other capped collections, the oplog can grow past its configured size limit to avoid deleting the majority commit point."*
+> — MongoDB Replica Set Oplog
+
+majority commit point가 뒤처지면 oplog를 truncate하지 않고 디스크를 더 씁니다. Full Replace의 175x oplog가 복제 lag을 유발하면, oplog는 configured size를 넘어 bloat됩니다. "Oplog 윈도우가 줄어든다"보다 "Oplog 디스크가 폭증한다"가 더 정확한 표현입니다.
 
 ---
 
@@ -161,6 +173,8 @@ coll.update_one({"_id": uid}, {"$set": {
 
 ORM/ODM을 쓰고 있다면 내부 구현을 확인하세요. **Spring Data MongoDB의 `save()`는 `replaceOne`, `updateFirst()` + `Update`는 partial `$set`**입니다. Mongoose의 `save()`는 기본적으로 dirty field만 전송하지만 `overwrite: true` 옵션 시 full replace가 됩니다.
 
+지금 운영 중인 코드가 replaceOne을 쓰는지 확인하는 가장 빠른 방법은 oplog를 한 번 들여다보는 것입니다. 100KB짜리 oplog entry가 보인다면 Full Replace가 쓰이고 있다는 신호입니다.
+
 ### 모니터링 알람 기준
 
 ```
@@ -168,6 +182,33 @@ cache: tracked dirty bytes / maximum bytes configured > 80%  → warning
 globalLock.currentQueue.writers > 20                          → alert
 cache: pages evicted by application threads delta > 1/sec     → critical
 ```
+
+---
+
+## MongoDB 8.0에서 달라지는 두 가지
+
+이 실험은 MongoDB 7.0 기준입니다. 8.0에서 두 가지 동작이 바뀌어서 재현 시 주의가 필요합니다.
+
+### 1. writer/applier thread 분리 → 측정 지표가 바뀌었습니다
+
+8.0부터 secondary가 oplog batch를 writer thread(수신)와 applier thread(적용)로 나눠서 병렬 처리합니다. 이에 따라 복제 모니터링 지표가 구식/신식으로 분리됐습니다.
+
+| | 7.0 이하 | 8.0+ |
+|--|---------|------|
+| 복제 버퍼 지표 | `metrics.repl.buffer.*` (단일) | `metrics.repl.buffer.apply.*` + `metrics.repl.buffer.write.*` (분리) |
+
+8.0 환경에서 복제 lag을 모니터링할 때는 `metrics.repl.buffer.apply.sizeBytes`를 확인하세요. write buffer는 안정한데 apply buffer가 쌓이면 secondary applier 단계가 병목입니다.
+
+### 2. w:majority가 더 일찍 반환됩니다
+
+7.0에서 `w:"majority"` write concern은 secondary가 변경 사항을 **적용(applied)**할 때 반환했습니다. 8.0부터는 secondary가 oplog entry를 **수신(wrote)**할 때 반환합니다.
+
+```
+7.0: commit 반환 = secondary가 변경 적용 완료
+8.0: commit 반환 = secondary가 oplog entry 수신 완료 (적용은 진행 중일 수 있음)
+```
+
+8.0 환경에서 commit 직후 secondary lag을 측정하면 7.0보다 lag이 남아있을 수 있습니다. 두 버전의 결과를 직접 비교하면 안 됩니다.
 
 ---
 
@@ -179,6 +220,8 @@ cache: pages evicted by application threads delta > 1/sec     → critical
 - **oplog**: document-level serialization → full document 직렬화 → 실제보다 크게 예측
 
 WiredTiger의 내부 동작을 두 레이어로 분리해서 이해해야 합니다. 메모리(dirty tracking)는 page 단위, 복제(oplog)는 document 단위입니다. 같은 연산이 레이어마다 다른 비용 구조를 가집니다.
+
+replaceOne을 쓰는 코드가 있다면 당장 바꾸는 것보다 먼저 oplog 크기와 dirty bytes 압력을 측정해보는 게 우선입니다. 어떤 문서를 얼마나 자주 교체하는지에 따라 영향 범위가 완전히 달라집니다.
 
 ---
 
@@ -194,5 +237,7 @@ python3 seed.py
 bash run_ladder.sh
 python3 analyze.py
 ```
+
+> **재현 시 버전 고정 권장**: MongoDB 7.0과 8.0은 복제 동작과 측정 지표가 다릅니다. 원 실험과 비교하려면 `image: mongo:7.0`으로 고정하세요.
 
 실험 코드: [kmando01/mongodb-write-cliff-bench](https://github.com/kmando01/mongodb-write-cliff-bench)
