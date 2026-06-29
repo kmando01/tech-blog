@@ -4,13 +4,15 @@
 
 ---
 
-JDK 25에서 JEP 491이 정식 포함됐습니다. `synchronized` 블록 안에서 가상 스레드가 blocking될 때 캐리어 스레드에 고정(pinned)되는 문제를 해결한 것입니다.
+JDK 25로 올리면 가상 스레드 pinning 걱정은 끝날까요?
 
-그렇다면 "JDK 25로 올리면 pinning 걱정은 끝"인가요?
+`synchronized` pinning은 완전히 해결됐습니다. JDK 21에서 4.33배 느렸던 것이 JDK 25에서 1.01배, 사실상 차이가 없어졌습니다. JEP 491의 효과입니다.
 
-반은 맞고 반은 틀립니다. `synchronized` pinning은 완전히 해결됐습니다. 그런데 JNI 호출 안에서의 pinning은 JDK 25에서도 그대로입니다. JDK 21에서 4.10배 느린 것이 JDK 25에서 4.04배 느립니다. 사실상 변화가 없습니다.
+그런데 JNI 호출 안에서의 pinning은 다릅니다. JDK 21에서 4.10배 느렸고, JDK 25에서 4.04배 느립니다. 사실상 변화가 없습니다. JDK 25로 올려도 JDBC native 드라이버, SSL/TLS 라이브러리가 carrier를 pin하고 있을 수 있습니다.
 
-이 글은 그 차이를 JDK 21/25에서 직접 측정한 과정입니다.
+이 글은 그 차이를 JDK 21/25에서 직접 측정하고, JNI pinning의 완화책까지 확인한 과정입니다.
+
+가상 스레드를 쓰고 계신다면 현재 코드베이스에 `synchronized` + blocking I/O가 얼마나 있는지 확인해보신 적 있으신가요? 이 실험을 시작한 계기도 그 질문이었습니다.
 
 ---
 
@@ -152,6 +154,8 @@ RatioJNI/Java = 4.04x → JNI PINNING CONFIRMED
 
 4.10x와 4.04x의 차이는 JDK 25의 전반적인 스케줄러 개선에 의한 노이즈 수준입니다. 실질적으로 동일합니다.
 
+JDK 25에서도 JNI 처리량이 그대로라는 결과가 놀라우셨나요? 사전 예측은 "드라이버가 에러를 던질 것"이었습니다. 다른 언어 드라이버(Mongoose, .NET)에서는 잘못된 설정 시 에러를 던집니다. Java는 달랐습니다.
+
 ### 왜 JNI는 고칠 수 없는가
 
 `synchronized`는 JVM이 monitor 소유권을 관리하기 때문에 JVM 수준에서 고칠 수 있었습니다. JNI는 다릅니다.
@@ -256,11 +260,11 @@ java -Djdk.tracePinnedThreads=full MyApp
 
 ## 이 실험에서 가장 놀라운 점
 
-사전 예측은 "JNI blocking 시 에러가 난다"였습니다. 다른 언어 드라이버(Mongoose, .NET)에서는 트랜잭션 안에서 잘못된 설정을 하면 에러를 던집니다.
+사전 예측은 "JNI blocking 시 에러가 난다"였습니다. 다른 언어 드라이버(Mongoose, .NET)에서는 잘못된 설정을 하면 에러를 던집니다. Java 드라이버는 silent하게 처리합니다.
 
-MongoDB Java 드라이버 silent override 실험에서 같은 패턴을 봤습니다. 에러가 없어서 문제를 알아채기 어려운 상황이 더 위험합니다.
+JNI pinning도 마찬가지입니다. 에러가 없고 로그도 없습니다. 처리량이 4배 줄어드는 동안 JVM은 아무 신호도 보내지 않습니다. `-Djdk.tracePinnedThreads=full` 없이는 운영 중에 발견하기 어렵습니다.
 
-JNI pinning도 마찬가지입니다. 에러가 없고 로그도 없습니다. `-Djdk.tracePinnedThreads=full` 없이는 운영 중에 발견하기 어렵습니다.
+이 점이 핵심입니다. 코드가 정상으로 보이고, 에러도 없고, 단지 처리량이 예상의 1/4이 됩니다.
 
 ---
 
