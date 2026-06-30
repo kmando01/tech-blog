@@ -26,6 +26,7 @@ Redis와 MongoDB에서 "성능을 높이려다 오히려 낮아진" 사례들을
 | 2 | [MongoDB replaceOne vs $set: 예측이 두 번 빗나갔다](./posts/2026-06-29-mongodb-replace-vs-set.md) | dirty bytes 1.9x(예측 33x), oplog 175x(예측 33x), 8.0 버전 주의사항 |
 | 3 | [핫 도큐먼트는 자기만 느린 게 아니다](./posts/2026-06-29-mongodb-hot-document.md) | cold worker -55% 피해, write ticket pool 인질 |
 | 4 | [MongoDB replaceOne이 secondary를 '멈춘다'는 말은 절반만 맞다](./posts/2026-06-29-mongodb-full-replace-replication.md) | 공식 문서 5개 검증 — snapshot reads, oplog bloat, 8.0 변경사항 |
+| 5 | [MongoDB가 동시에 두 곳에서 무너지는 이유](./posts/2026-06-30-mongodb-write-payload-dual-failure.md) | payload size가 WiredTiger dirty eviction과 chained applyOps를 동시에 압박하는 단일 변수 |
 
 ---
 
